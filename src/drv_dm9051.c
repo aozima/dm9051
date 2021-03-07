@@ -474,9 +474,9 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
 
     dm9051_lock(dev);
 
-    DM9051_write_reg(spi_device, DM9051_IMR, IMR_PAR); // Disable all interrupts
+    DM9051_write_reg(spi_device, DM9051_IMR, DM9051_IMR_OFF); // Disable all interrupts
     isr_reg = DM9051_read_reg(spi_device, DM9051_ISR);
-    DM9051_write_reg(spi_device, DM9051_ISR, isr_reg);	// Clear ISR status ---> can be clear ???
+    DM9051_write_reg(spi_device, DM9051_ISR, (isr_reg & ISR_CLR_STATUS));  // Clear ISR status
     LOG_D("isr_reg=0x%x", isr_reg);
 
     /*********** link status check*************/
@@ -546,43 +546,46 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
 
     if (isr_reg & ISR_PRS)
     {
-    }
-
-    /* Check packet ready or not                                                                              */
-    rxbyte = DM9051_read_reg(spi_device, DM9051_MRCMDX);
-    rxbyte = DM9051_read_reg(spi_device, DM9051_MRCMDX);
-    LOG_D("MRCMDX = %02X.", rxbyte);
-
-    if ((rxbyte != 1) && (rxbyte != 0))
-    {
-        LOG_W("MRCMDX %02X: rx error, dm9051_chip_reset", rxbyte);
-
-        dm9051_chip_reset(spi_device);
-
-        /* Reset RX FIFO pointer */
-        //DM9051_write_reg(spi_device, DM9051_RCR, RCR_DEFAULT); //RX disable
-        //DM9051_write_reg(spi_device, DM9051_MPCR, 0x01);       //Reset RX FIFO pointer
-        rt_thread_delay(2);
-        DM9051_write_reg(spi_device, DM9051_RCR, (RCR_DEFAULT | RCR_RXEN | (1<<3) | (1<<1))); //RX Enable
-
-        goto _exit;
-    }
-
-    if (rxbyte)
-    {
         uint16_t rx_status, rx_len;
-        //uint16_t* data = 0;
-
         uint8_t ReceiveData[4];
 
-        DM9051_read_reg(spi_device, DM9051_MRCMDX); //dummy read
+        /* Check packet ready or not                                                                              */
+        nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR) & NSR_RXRDY;
+        if (nsr_reg)
+        {
+            rxbyte = DM9051_read_reg(spi_device, DM9051_MRCMDX);
+            rxbyte = DM9051_read_reg(spi_device, DM9051_MRCMDX1);
+            LOG_D("MRCMDX = %02X.", rxbyte);
+
+            if (rxbyte != 0x01)
+            {
+                LOG_E("NSR %02X, RCMDX %02X: rx error, dm9051_chip_rx_fifo_reset", nsr_reg, rxbyte);
+                DM9051_write_reg(spi_device, DM9051_MPCR, 0x01); //reset rx point
+                DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_RX_STATUS);
+
+                goto _exit;
+            }
+        }
+        else
+        {
+            DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_RX_STATUS);
+
+            goto _exit;
+        }
 
         DM9051_read_mem(spi_device, ReceiveData, 4);
 
         rx_status = ReceiveData[0] + (ReceiveData[1] << 8);
         rx_len = ReceiveData[2] + (ReceiveData[3] << 8);
-        rx_status = rx_status;
-        LOG_D("rx_status = %04X. rx_len = %04X.", rx_status, rx_len);
+
+        if ((rx_status & 0x3900) || rx_len < 12)
+        {
+            LOG_W("rx_status = %04X. rx_len = %04X.", rx_status, rx_len);
+        }
+        else
+        {
+            LOG_D("rx_status = %04X. rx_len = %04X.", rx_status, rx_len);
+        }
 
         /* allocate buffer           */
         p = pbuf_alloc(PBUF_LINK, rx_len, PBUF_RAM);
@@ -592,11 +595,45 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
         }
         else
         {
-            LOG_E("DM9051 rx: no pbuf.");
-            /* no pbuf, discard data from DM9051  */
-            //DM9051_read_mem(spi_device, databyte, rx_len);
+            LOG_W("DM9051 rx: no pbuf.");
+
+#if (DM9051_NO_PBUF_LEVEL >= 2)
+            //keep data in dm9051 fifo
+            uint16_t wRx_point;
+
+            wRx_point = (DM9051_read_reg(spi_device, DM9051_MRRH) << 8);
+            wRx_point |= DM9051_read_reg(spi_device, DM9051_MRRL);
+
+            wRx_point -= 04;
+            if (wRx_point < 0x0c00)
+            {
+                wRx_point += 0x3400;
+            }
+
+            DM9051_write_reg(spi_device, DM9051_MRRL, wRx_point & 0xff);
+            DM9051_write_reg(spi_device, DM9051_MRRH, (wRx_point >> 8) & 0xff);
+#elif (DM9051_NO_PBUF_LEVEL == 1)
+            // jump one packet
+            uint16_t wRx_point;
+
+            wRx_point = (DM9051_read_reg(spi_device, DM9051_MRRH) << 8);
+            wRx_point |= DM9051_read_reg(spi_device, DM9051_MRRL);
+
+            wRx_point += rx_len;
+            if (wRx_point > 0x3fff)
+            {
+                wRx_point -= 0x3400;
+            }
+
+            DM9051_write_reg(spi_device, DM9051_MRRL, wRx_point & 0xff);
+            DM9051_write_reg(spi_device, DM9051_MRRH, (wRx_point >> 8) & 0xff);
+#else
+            //clean rx fifo data
+            DM9051_write_reg(spi_device, DM9051_MPCR, 0x01); //reset rx point
+            DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_RX_STATUS);
+#endif
         }
-    }
+    } /* isr_reg & ISR_PRS */
 
 #ifdef DM9051_RX_DUMP
     if(p)
@@ -604,7 +641,7 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
 #endif /* DM9051_RX_DUMP */
 
 _exit:
-    DM9051_write_reg(spi_device, DM9051_IMR, IMR_PAR | IMR_ROOI | IMR_ROI | IMR_PTM | IMR_PRM | IMR_LNKCHGI); // Re-enable interrupt mask
+    DM9051_write_reg(spi_device, DM9051_IMR, DM9051_IMR_SET); // Re-enable interrupt mask
 
     dm9051_unlock(dev);
 
