@@ -527,17 +527,15 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
     // Receive Overflow Counter Overflow
     if (isr_reg & ISR_ROOS)
     {
-        LOG_W("dm9051_chip_reset \n");
+        LOG_E("dm9051_chip_reset Receive Overflow Counter Overflow");
         dm9051_chip_reset(spi_device);
-        DM9051_write_reg(spi_device, DM9051_RCR, (RCR_DEFAULT | RCR_RXEN | (1<<3) | (1<<1))); //RX Enable
+        goto _exit;
     }
 
     // Receive Overflow
     if (isr_reg & ISR_ROS)
     {
-        LOG_W("dm9051_chip_reset \n");
-        dm9051_chip_reset(spi_device);
-        DM9051_write_reg(spi_device, DM9051_RCR, (RCR_DEFAULT | RCR_RXEN | (1<<3) | (1<<1))); //RX Enable
+        LOG_W("Receive_FIFO Overflow");
     }
 
     // transmit
