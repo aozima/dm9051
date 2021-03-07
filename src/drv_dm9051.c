@@ -13,6 +13,9 @@
 //#define DM9051_TX_DUMP
 //#define DM9051_DUMP_RAW
 
+//#define DM9051_FLOWCONTROL_EN
+#define DM9051_NO_PBUF_LEVEL  1
+
 #define DBG_SECTION_NAME    "[drv.dm9051] "
 #define DBG_LEVEL           DBG_INFO
 #define DBG_COLOR
@@ -147,10 +150,38 @@ static void DM9051_write_mem(struct rt_spi_device *spi_device, const void *buf, 
 static void dm9051_soft_reset(struct rt_spi_device *spi_device)
 {
     rt_thread_delay(2); // delay 2 ms any need before NCR_RST (20170510)
-    DM9051_write_reg(spi_device, DM9051_NCR, NCR_RST);
-    rt_thread_delay(1);
-    DM9051_write_reg(spi_device, 0x5e, 0x80); // 5eH reg is not exist, why set?  datasheet is not all info???
-    rt_thread_delay(1);
+    DM9051_write_reg(spi_device, DM9051_NCR, DM9051_NCR_REG_RESET);
+    rt_thread_delay(2);
+    DM9051_write_reg(spi_device, DM9051_NCR, 0);
+
+    /* Setup DM9051 Registers */
+    DM9051_write_reg(spi_device, DM9051_NCR, NCR_DEFAULT);
+    DM9051_write_reg(spi_device, DM9051_IMR, DM9051_IMR_OFF);
+    DM9051_write_reg(spi_device, DM9051_TCR, TCR_DEFAULT);
+    DM9051_write_reg(spi_device, DM9051_BPTR, BPTR_DEFAULT);
+    DM9051_write_reg(spi_device, DM9051_FCTR, FCTR_DEAFULT);
+    DM9051_write_reg(spi_device, DM9051_FCR, FCR_DEFAULT);
+
+    //DM9051_write_reg(spi_device, DM9051_INTCR, (0<<1) | (1<<0)); /* [1] 0:push-pull. [0] 0:active high, 1:active low. */
+    DM9051_write_reg(spi_device, DM9051_INTCR, 0x00);
+    DM9051_write_reg(spi_device, DM9051_INTCKCR, 0x81);
+
+    /* Clear status */
+    DM9051_write_reg(spi_device, DM9051_NSR, NSR_CLR_STATUS);
+    DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_STATUS);
+
+    /* edit */
+#ifdef DM9051_FLOWCONTROL_EN
+    DM9051_write_reg(spi_device, DM9051_FCR, FCR_FLOW_ENABLE); /* Flow Control */
+#else
+    DM9051_write_reg(spi_device, DM9051_FCR, 0x00); /* Flow Control */
+#endif
+    DM9051_write_reg(spi_device, DM9051_PPCR, PPCR_SETTING); /* Fully Pause Packet Count */
+    DM9051_write_reg(spi_device, DM9051_NLEDCR, 0x81);       //set led model
+    DM9051_write_reg(spi_device, DM9051_ATCR, 0x80);         //set TX auto_send
+    DM9051_write_reg(spi_device, DM9051_BCASTCR, 0xC0);      //set rec broadcast packet
+
+    DM9051_write_reg(spi_device, DM9051_RCR, RCR_DEFAULT);
 }
 
 static void dm9051_chip_reset(struct rt_spi_device *spi_device)
@@ -158,11 +189,7 @@ static void dm9051_chip_reset(struct rt_spi_device *spi_device)
     //dbg_log("++\n");
     dm9051_soft_reset(spi_device);
 
-    DM9051_write_reg(spi_device, DM9051_FCR, FCR_FLOW_ENABLE); /* Flow Control */
-    DM9051_write_reg(spi_device, DM9051_PPCR, PPCR_SETTING);   /* Fully Pause Packet Count */
-    DM9051_write_reg(spi_device, DM9051_IMR, IMR_PAR | IMR_ROOI | IMR_ROI | IMR_PTM | IMR_PRM | IMR_LNKCHGI);
-    //dm9051_spi_write_reg(db, DM9051_RCR, RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN);
-    //DM9051_write_reg(spi_device, DM9051_RCR, db->rcr_all);
+    DM9051_write_reg(spi_device, DM9051_IMR, DM9051_IMR_SET);
 }
 
 #define DM9051_PHY              (0x40)    /* PHY address 0x01 */
@@ -257,27 +284,23 @@ static rt_err_t dm9051_init(rt_device_t dev)
         LOG_I("MAC: %02X-%02X-%02X-%02X-%02X-%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
 
+    {
+        for (i = 0, oft = DM9051_MAR; i < 7; i++, oft++)
+        {
+            DM9051_write_reg(spi_device, oft, 0x00);
+        }
+        DM9051_write_reg(spi_device, oft, 0x80);
+        LOG_I("Clean Multicast Address Hash Table");
+    }
+
     /* Activate DM9051 */
-    /* Setup DM9051 Registers */
-    DM9051_write_reg(spi_device, DM9051_NCR, NCR_DEFAULT);
-    DM9051_write_reg(spi_device, DM9051_TCR, TCR_DEFAULT);
-    //DM9051_write_reg(spi_device, DM9051_TCR, 0x20); //Disable underrun retry.
-    DM9051_write_reg(spi_device, DM9051_RCR, RCR_DEFAULT);
-    DM9051_write_reg(spi_device, DM9051_BPTR, BPTR_DEFAULT);
-    //DM9051_write_reg(spi_device, DM9051_FCTR, FCTR_DEAFULT);
-    DM9051_write_reg(spi_device, DM9051_FCTR, 0x3A);
-    DM9051_write_reg(spi_device, DM9051_FCR, FCR_DEFAULT);
-    //DM9051_write_reg(spi_device, DM9051_FCR,  0x0); //Disable Flow_Control
-    DM9051_write_reg(spi_device, DM9051_SMCR, SMCR_DEFAULT);
-    DM9051_write_reg(spi_device, DM9051_TCR2, DM9051_TCR2_SET);
-    //DM9051_write_reg(spi_device, DM9051_TCR2, 0x80);
+    dm9051_soft_reset(spi_device);
 
-    //DM9051_write_reg(spi_device, DM9051_INTCR, (0<<1) | (1<<0)); /* [1] 0:push-pull. [0] 0:active high, 1:active low. */
-    DM9051_write_reg(spi_device, DM9051_INTR, 0x00);
-
-    /* Clear status */
-    DM9051_write_reg(spi_device, DM9051_NSR, NSR_CLR_STATUS);
-    DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_STATUS);
+#ifdef DM9051_FLOWCONTROL_EN
+    LOG_I("Enable Flow_Control Function");
+#else
+    LOG_I("Disable Flow_Control Function");
+#endif
 
     rt_pin_irq_enable(eth->int_pin, PIN_IRQ_ENABLE);
     rt_timer_start(&eth->timer);
