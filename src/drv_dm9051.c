@@ -385,14 +385,15 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
 #endif /* DM9051_TX_DUMP */
 
     {
-        rt_uint32_t retry=0;
+        rt_uint32_t retry = 0;
+        uint8_t nsr_reg = 0;
 
         // wait for sending complete
-        while (DM9051_read_reg(spi_device, DM9051_TCR) & TCR_TXREQ)
+        while (!(nsr_reg = (DM9051_read_reg(spi_device, DM9051_NSR) & (NSR_TX1END | NSR_TX2END))))
         {
             retry++;
 
-            if(retry > 10)
+            if (retry > 10)
             {
                 LOG_E("wait for send complete timeout, retry=%d, abort!", retry);
                 goto _exit;
@@ -401,18 +402,23 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
             rt_thread_delay(1);
         }
 
-        if(retry > 2)
+        if (retry > 2)
         {
             LOG_E("TX wait %d.", retry);
         }
+
+        if ((NSR_TX1END | NSR_TX2END) == nsr_reg)
+        {
+            DM9051_write_reg(spi_device, DM9051_MPCR, 0x02); //reset tx point
+        }
     }
 
-    if(p->tot_len != p->len)
+    if (p->tot_len != p->len)
     {
         LOG_D("[%s L%d], tot_len:len ==> %d:%d", __FUNCTION__, __LINE__, p->tot_len, p->len);
 
         tmp_buf = (void *)rt_malloc(p->tot_len);
-        if(!tmp_buf)
+        if (!tmp_buf)
         {
             LOG_W("[%s L%d], no memory for pbuf, len=%d.", __FUNCTION__, __LINE__, p->tot_len);
             goto _exit;
@@ -420,6 +426,10 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
 
         pbuf_copy_partial(p, tmp_buf, p->tot_len, 0);
     }
+
+    //Write data to FIFO
+    DM9051_write_reg(spi_device, DM9051_TXPLL, p->tot_len & 0xff);
+    DM9051_write_reg(spi_device, DM9051_TXPLH, (p->tot_len >> 8) & 0xff);
 
     if (tmp_buf)
     {
@@ -430,15 +440,8 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
         DM9051_write_mem(spi_device, p->payload, p->tot_len);
     }
 
-    //Write data to FIFO
-    DM9051_write_reg(spi_device, DM9051_TXPLL, p->tot_len & 0xff);
-    DM9051_write_reg(spi_device, DM9051_TXPLH, (p->tot_len >> 8) & 0xff);
-
-    // start send cmd
-    DM9051_write_reg(spi_device, DM9051_TCR, TCR_TXREQ);
-
 _exit:
-    if(tmp_buf)
+    if (tmp_buf)
     {
         rt_free(tmp_buf);
     }
