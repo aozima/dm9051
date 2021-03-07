@@ -463,6 +463,7 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
     struct rt_spi_device *spi_device;
 
     uint8_t isr_reg, rxbyte;
+    uint8_t nsr_reg;
     struct pbuf *p = RT_NULL;
 
     eth = (struct rt_dm9051_eth *)dev;
@@ -481,57 +482,47 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
     /*********** link status check*************/
     if (isr_reg & ISR_LNKCHGS)
     {
-        uint8_t nsr = DM9051_read_reg(spi_device, DM9051_NSR);
-        LOG_D("[%s L%d] DM9051_NSR=0x%08X", __FUNCTION__, __LINE__, nsr);
-
-        if(nsr & NSR_LINKST)
+        nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR);
+        if (nsr_reg & NSR_LINKST)
         {
-            uint16_t lnk, stats;
+            uint8_t lnk_status;
+            uint8_t ncr_reg;
 
-            lnk = phy_read(spi_device, DM9051_PHY_REG_BMSR); // 786D: 0111 1000 0110 1101
-            stats = phy_read(spi_device, DM9051_PHY_REG_DSCSR); // 8218 1000 0010 0001 1000
+            rt_thread_delay(500);
 
-            LOG_D("lnk=%04X, stats=%04X", lnk, stats);
-            if (lnk & (1 << 5))
+            ncr_reg = DM9051_read_reg(spi_device, DM9051_NCR) & NCR_FDX;
+            nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR) & (NSR_SPEED | NSR_LINKST);
+
+            lnk_status = nsr_reg | ncr_reg;
+            LOG_D("[%s L%d] DM9051_NSR=0x%08X", __FUNCTION__, __LINE__, lnk_status);
+            switch (lnk_status)
             {
-                LOG_D("phy auto done!", __FUNCTION__, __LINE__);
+            case (NSR_LINKST):
+                LOG_I("link up phy 100M hal duplex!", __FUNCTION__, __LINE__);
+                break;
+            case (NSR_LINKST | NCR_FDX):
+                LOG_I("link up phy 100M full duplex!", __FUNCTION__, __LINE__);
+                break;
+            case (NSR_SPEED | NSR_LINKST):
+                LOG_I("link up phy 10M hal duplex!", __FUNCTION__, __LINE__);
+                break;
+            case (NSR_SPEED | NSR_LINKST | NCR_FDX):
+                LOG_I("link up phy 10M full duplex!", __FUNCTION__, __LINE__);
+                break;
+
+            default:
+                break;
             }
 
-            if (stats & (1 << 3))
-            {
-                stats = stats>>12;
-                switch (stats)
-                {
-                case 1:
-                    LOG_I("phy 10M half duplex!", __FUNCTION__, __LINE__);
-                    break;
-
-                case 2:
-                    LOG_I("phy 10M full duplex!", __FUNCTION__, __LINE__);
-                    break;
-
-                case 4:
-                    LOG_I("phy 100M half duplex!", __FUNCTION__, __LINE__);
-                    break;
-
-                case 8:
-                    LOG_I("phy 100M full duplex!", __FUNCTION__, __LINE__);
-                    break;
-
-                default:
-                    break;
-                }
-            }
-
-            LOG_I("link up!", __FUNCTION__, __LINE__);
+            // LOG_I("link up!", __FUNCTION__, __LINE__);
             eth_device_linkchange(&eth->parent, RT_TRUE);
         }
         else
         {
-            LOG_W("link down!\n", __FUNCTION__, __LINE__);
+            // LOG_W("link down!\n", __FUNCTION__, __LINE__);
             eth_device_linkchange(&eth->parent, RT_FALSE);
         }
-    }
+    } /* link status check */
 
     // Receive Overflow Counter Overflow
     if (isr_reg & ISR_ROOS)
