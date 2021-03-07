@@ -389,10 +389,15 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
         uint8_t nsr_reg = 0;
 
         // wait for sending complete
-        while (!(nsr_reg = (DM9051_read_reg(spi_device, DM9051_NSR) & (NSR_TX1END | NSR_TX2END))))
+        while (1)
         {
-            retry++;
+            nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR) & (NSR_TX1END | NSR_TX2END);
+            if(nsr_reg != 0)
+            {
+                break;
+            }
 
+            retry++;
             if (retry > 10)
             {
                 LOG_E("wait for send complete timeout, retry=%d, abort!", retry);
