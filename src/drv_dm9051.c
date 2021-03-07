@@ -232,10 +232,12 @@ static uint16_t phy_read(struct rt_spi_device *spi_device, uint32_t reg_oft)
 
 static void phy_mode_set(struct rt_spi_device *spi_device)
 {
-    uint16_t phy_reg4 = 0x01e1, phy_reg0 = 0x1000;
+    uint16_t phy_reg4 = 0x01e1, phy_reg0 = 0x1200;
 
     phy_write(spi_device, 4, phy_reg4); /* Set PHY media mode */
     phy_write(spi_device, 0, phy_reg0); /* Tmp */
+    phy_write(spi_device, 20, 0x0200); /* Tmp */
+
 }
 
 /* initialize the interface */
