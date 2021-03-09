@@ -14,6 +14,7 @@
 //#define DM9051_DUMP_RAW
 
 //#define DM9051_FLOWCONTROL_EN
+//#define DM9051_PACKET_CNT_EN
 #define DM9051_NO_PBUF_LEVEL  1
 
 #define DBG_SECTION_NAME    "[drv.dm9051] "
@@ -37,6 +38,11 @@ struct rt_dm9051_eth
     struct rt_semaphore tx_buf_free;
     struct rt_mutex lock;
     struct rt_timer timer;
+
+#ifdef DM9051_PACKET_CNT_EN
+    uint32_t tx_count;
+    uint32_t rx_count;
+#endif /* DM9051_PACKET_CNT_EN */
 };
 
 #define dm9051_lock(dev)      rt_mutex_take(&((struct rt_dm9051_eth*)dev)->lock, RT_WAITING_FOREVER);
@@ -445,6 +451,10 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
         DM9051_write_mem(spi_device, p->payload, p->tot_len);
     }
 
+#ifdef DM9051_PACKET_CNT_EN
+    eth->tx_count++;
+#endif /* DM9051_PACKET_CNT_EN */
+
 _exit:
     if (tmp_buf)
     {
@@ -591,6 +601,9 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
         p = pbuf_alloc(PBUF_LINK, rx_len, PBUF_RAM);
         if (p != NULL)
         {
+#ifdef DM9051_PACKET_CNT_EN
+            eth->rx_count++;
+#endif /* DM9051_PACKET_CNT_EN */
             DM9051_read_mem(spi_device, (u8_t *)p->payload, rx_len);
         }
         else
@@ -781,6 +794,14 @@ static int dm9051_dump(void)
     struct rt_spi_device *spi_device = dm9051_monitor->spi_device;
 
     rt_kprintf("[%s L%d], irq count:%d.\n", __FUNCTION__, __LINE__, dm9051_monitor->irq_count);
+    dm9051_monitor->irq_count = 0;
+
+#ifdef DM9051_PACKET_CNT_EN
+    rt_kprintf("[%s L%d], tx_count:%d.\n", __FUNCTION__, __LINE__, dm9051_monitor->tx_count);
+    rt_kprintf("[%s L%d], rx_count:%d.\n", __FUNCTION__, __LINE__, dm9051_monitor->rx_count);
+    dm9051_monitor->tx_count = 0;
+    dm9051_monitor->rx_count = 0;
+#endif /* DM9051_PACKET_CNT_EN */
 
     pos=0;
     value = DM9051_read_reg(spi_device, pos);
@@ -856,6 +877,7 @@ static int dm9051_dump(void)
 
     pos = DM9051_PHY_REG_BMSR;
     value = phy_read(spi_device, pos);
+    value = phy_read(spi_device, pos); //update_value
     rt_kprintf("#%02X 0x%04X BMSR\n", pos, value);
 
     /* ID1=0181, ID2=B8A0, OUI=0x0000C0DC, Vendor Model:0x0A, Model Revision:0x00. */
