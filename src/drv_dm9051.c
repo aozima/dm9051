@@ -14,6 +14,7 @@
 //#define DM9051_DUMP_RAW
 
 //#define DM9051_FLOWCONTROL_EN
+//#define DM9051_WAIT_NWAY_LINK_EN
 //#define DM9051_PACKET_CNT_EN
 #define DM9051_NO_PBUF_LEVEL  1
 
@@ -240,10 +241,14 @@ static void phy_mode_set(struct rt_spi_device *spi_device)
 {
     uint16_t phy_reg4 = 0x01e1, phy_reg0 = 0x1200;
 
-    phy_write(spi_device, 4, phy_reg4); /* Set PHY media mode */
-    phy_write(spi_device, 0, phy_reg0); /* Tmp */
-    phy_write(spi_device, 20, 0x0200); /* Tmp */
+    phy_write(spi_device, 20, 0x0200); /* Disable NWAY powersaver */
 
+#ifdef DM9051_FLOWCONTROL_EN
+    phy_write(spi_device, 4, phy_reg4 | 0x0400); /* Set PHY media mode */
+#else
+    phy_write(spi_device, 4, phy_reg4); /* Set PHY media mode */
+#endif /* DM9051_FLOWCONTROL_EN */
+    phy_write(spi_device, 0, phy_reg0); /* RE_START NWAY */
 }
 
 /* initialize the interface */
@@ -495,10 +500,11 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
         nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR);
         if (nsr_reg & NSR_LINKST)
         {
+#ifdef DM9051_WAIT_NWAY_LINK_EN
             uint8_t lnk_status;
             uint8_t ncr_reg;
 
-            rt_thread_delay(500);
+            rt_thread_delay(rt_tick_from_millisecond(5000));
 
             ncr_reg = DM9051_read_reg(spi_device, DM9051_NCR) & NCR_FDX;
             nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR) & (NSR_SPEED | NSR_LINKST);
@@ -523,13 +529,14 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
             default:
                 break;
             }
-
-            // LOG_I("link up!", __FUNCTION__, __LINE__);
+#else
+            LOG_I("link up!", __FUNCTION__, __LINE__);
+#endif /* DM9051_WAIT_NWAY_LINK_EN */
             eth_device_linkchange(&eth->parent, RT_TRUE);
         }
         else
         {
-            // LOG_W("link down!\n", __FUNCTION__, __LINE__);
+            LOG_W("link down!\n", __FUNCTION__, __LINE__);
             eth_device_linkchange(&eth->parent, RT_FALSE);
         }
     } /* link status check */
