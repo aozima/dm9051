@@ -40,6 +40,11 @@ struct rt_dm9051_eth
     struct rt_mutex lock;
     struct rt_timer timer;
 
+#if (LWIP_IPV4 && LWIP_IGMP) || (LWIP_IPV6 && LWIP_IPV6_MLD)
+    uint32_t HashTableHigh;
+    uint32_t HashTableLow;
+#endif
+
 #ifdef DM9051_PACKET_CNT_EN
     uint32_t tx_count;
     uint32_t rx_count;
@@ -251,6 +256,132 @@ static void phy_mode_set(struct rt_spi_device *spi_device)
     phy_write(spi_device, 0, phy_reg0); /* RE_START NWAY */
 }
 
+#if (LWIP_IPV4 && LWIP_IGMP) || (LWIP_IPV6 && LWIP_IPV6_MLD)
+
+/* polynomial: 0xEDB88320L */
+static uint32_t crc32_le(const uint8_t *data, size_t length)
+{
+    uint32_t crc = 0xffffffff;
+
+    int i;
+    while (length--)
+    {
+        crc ^= *data++;
+        for (i = 0; i < 8; i++)
+        {
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320L : 0);
+        }
+    }
+    return crc;
+}
+
+static void register_multicast_address(struct rt_dm9051_eth *eth, const uint8_t *mac, u8_t action)
+{
+    struct rt_spi_device *spi_device;
+    spi_device = eth->spi_device;
+
+    uint32_t crc;
+    uint8_t hash;
+    uint8_t hash_group;
+
+    /* calculate crc32 value of mac address */
+    crc = crc32_le(mac, 6);
+
+    hash = crc & 0x3F;
+    LOG_D("register_%s multicast_address crc: %08X hash: %02X\n",
+          ((action) ? "add" : "del"), crc, hash);
+
+    hash_group = hash / 8;
+
+    if (hash > 31)
+    {
+        if (action) // NETIF_ADD_MAC_FILTER
+        {
+            eth->HashTableHigh |= 1 << (hash - 32);
+        }
+        else // NETIF_DEL_MAC_FILTER
+        {
+            eth->HashTableHigh &= ~(1 << (hash - 32));
+        }
+        DM9051_write_reg(spi_device, DM9051_MAR + hash_group, (eth->HashTableHigh >> (hash_group - 4) * 8) & 0xff);
+    }
+    else
+    {
+        if (action) // NETIF_ADD_MAC_FILTER
+        {
+            eth->HashTableLow |= 1 << hash;
+        }
+        else // NETIF_DEL_MAC_FILTER
+        {
+            eth->HashTableLow &= ~(1 << hash);
+        }
+        DM9051_write_reg(spi_device, DM9051_MAR + hash_group, (eth->HashTableLow >> (hash_group * 8)) & 0xff);
+    }
+    /*
+    {
+        LOG_I("HashTableHigh %08lx , HashTableLow %08lx ",
+                eth->HashTableHigh , eth->HashTableLow );
+        uint8_t mar[8];
+        uint8_t i, oft;
+        for (i = 0, oft = DM9051_MAR; i < sizeof(mar); i++, oft++)
+        {
+            mar[i] = DM9051_read_reg(spi_device, oft);
+        }
+        LOG_I("MAR: %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X",
+                mar[0], mar[1], mar[2], mar[3], mar[4], mar[5], mar[6], mar[7]);
+    }
+    */
+}
+#endif /* (LWIP_IPV4 && LWIP_IGMP) || (LWIP_IPV6 && LWIP_IPV6_MLD) */
+
+#if LWIP_IPV4 && LWIP_IGMP
+static err_t igmp_mac_filter( struct netif *netif, const ip4_addr_t *ip4_addr, u8_t action )
+{
+    uint8_t mac[6];
+    const uint8_t *p = (const uint8_t *)ip4_addr;
+    struct rt_dm9051_eth *eth = (struct rt_dm9051_eth *)netif->state;
+
+    mac[0] = 0x01;
+    mac[1] = 0x00;
+    mac[2] = 0x5E;
+    mac[3] = *(p+1) & 0x7F;
+    mac[4] = *(p+2);
+    mac[5] = *(p+3);
+
+    register_multicast_address(eth, mac, action);
+
+    LOG_D("%s %s %s ",
+            __FUNCTION__, (action==NETIF_ADD_MAC_FILTER)?"add":"del", ip4addr_ntoa(ip4_addr));
+    LOG_D("%02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    return 0;
+}
+#endif /* LWIP_IPV4 && LWIP_IGMP */
+
+#if LWIP_IPV6 && LWIP_IPV6_MLD
+static err_t mld_mac_filter( struct netif *netif, const ip6_addr_t *ip6_addr, u8_t action )
+{
+    uint8_t mac[6];
+    const uint8_t *p = (const uint8_t *)&ip6_addr->addr[3];
+    struct rt_dm9051_eth *eth = (struct rt_dm9051_eth *)netif->state;
+
+    mac[0] = 0x33;
+    mac[1] = 0x33;
+    mac[2] = *(p+0);
+    mac[3] = *(p+1);
+    mac[4] = *(p+2);
+    mac[5] = *(p+3);
+
+    register_multicast_address(eth, mac, action);
+
+    LOG_D("%s %s %s ",
+             __FUNCTION__, (action==NETIF_ADD_MAC_FILTER)?"add":"del", ip6addr_ntoa(ip6_addr));
+    LOG_D("%02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    return 0;
+}
+#endif /* LWIP_IPV6 && LWIP_IPV6_MLD */
+
 /* initialize the interface */
 static rt_err_t dm9051_init(rt_device_t dev)
 {
@@ -298,12 +429,15 @@ static rt_err_t dm9051_init(rt_device_t dev)
     }
 
     {
-        for (i = 0, oft = DM9051_MAR; i < 7; i++, oft++)
+        for (i = 0, oft = DM9051_MAR; i < 8; i++, oft++)
         {
             DM9051_write_reg(spi_device, oft, 0x00);
         }
-        DM9051_write_reg(spi_device, oft, 0x80);
         LOG_I("Clean Multicast Address Hash Table");
+#if (LWIP_IPV4 && LWIP_IGMP) || (LWIP_IPV6 && LWIP_IPV6_MLD)
+        eth->HashTableHigh = 0;
+        eth->HashTableLow = 0;
+#endif
     }
 
     /* Activate DM9051 */
@@ -789,7 +923,16 @@ int dm9051_probe(const char *spi_dev_name, const char *device_name, int rst_pin,
     rt_timer_init(&eth->timer, "dm9051", dm9051_timeout, eth, RT_TICK_PER_SECOND/2, RT_TIMER_FLAG_PERIODIC | RT_TIMER_FLAG_SOFT_TIMER);
 
     dm9051_monitor = eth;
+
     eth_device_init(&eth->parent, "e0");
+
+#if LWIP_IPV4 && LWIP_IGMP
+    netif_set_igmp_mac_filter(eth->parent.netif, igmp_mac_filter);
+#endif
+
+#if LWIP_IPV6 && LWIP_IPV6_MLD
+    netif_set_mld_mac_filter(eth->parent.netif, mld_mac_filter);
+#endif
 
     return 0;
 }
