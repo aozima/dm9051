@@ -13,6 +13,11 @@
 //#define DM9051_TX_DUMP
 //#define DM9051_DUMP_RAW
 
+//#define DM9051_FLOWCONTROL_EN
+//#define DM9051_WAIT_NWAY_LINK_EN
+//#define DM9051_PACKET_CNT_EN
+#define DM9051_NO_PBUF_LEVEL  1
+
 #define DBG_SECTION_NAME    "[drv.dm9051] "
 #define DBG_LEVEL           DBG_INFO
 #define DBG_COLOR
@@ -34,6 +39,16 @@ struct rt_dm9051_eth
     struct rt_semaphore tx_buf_free;
     struct rt_mutex lock;
     struct rt_timer timer;
+
+#if (LWIP_IPV4 && LWIP_IGMP) || (LWIP_IPV6 && LWIP_IPV6_MLD)
+    uint32_t HashTableHigh;
+    uint32_t HashTableLow;
+#endif
+
+#ifdef DM9051_PACKET_CNT_EN
+    uint32_t tx_count;
+    uint32_t rx_count;
+#endif /* DM9051_PACKET_CNT_EN */
 };
 
 #define dm9051_lock(dev)      rt_mutex_take(&((struct rt_dm9051_eth*)dev)->lock, RT_WAITING_FOREVER);
@@ -147,10 +162,38 @@ static void DM9051_write_mem(struct rt_spi_device *spi_device, const void *buf, 
 static void dm9051_soft_reset(struct rt_spi_device *spi_device)
 {
     rt_thread_delay(2); // delay 2 ms any need before NCR_RST (20170510)
-    DM9051_write_reg(spi_device, DM9051_NCR, NCR_RST);
-    rt_thread_delay(1);
-    DM9051_write_reg(spi_device, 0x5e, 0x80); // 5eH reg is not exist, why set?  datasheet is not all info???
-    rt_thread_delay(1);
+    DM9051_write_reg(spi_device, DM9051_NCR, DM9051_NCR_REG_RESET);
+    rt_thread_delay(2);
+    DM9051_write_reg(spi_device, DM9051_NCR, 0);
+
+    /* Setup DM9051 Registers */
+    DM9051_write_reg(spi_device, DM9051_NCR, NCR_DEFAULT);
+    DM9051_write_reg(spi_device, DM9051_IMR, DM9051_IMR_OFF);
+    DM9051_write_reg(spi_device, DM9051_TCR, TCR_DEFAULT);
+    DM9051_write_reg(spi_device, DM9051_BPTR, BPTR_DEFAULT);
+    DM9051_write_reg(spi_device, DM9051_FCTR, FCTR_DEAFULT);
+    DM9051_write_reg(spi_device, DM9051_FCR, FCR_DEFAULT);
+
+    //DM9051_write_reg(spi_device, DM9051_INTCR, (0<<1) | (1<<0)); /* [1] 0:push-pull. [0] 0:active high, 1:active low. */
+    DM9051_write_reg(spi_device, DM9051_INTCR, 0x00);
+    DM9051_write_reg(spi_device, DM9051_INTCKCR, 0x81);
+
+    /* Clear status */
+    DM9051_write_reg(spi_device, DM9051_NSR, NSR_CLR_STATUS);
+    DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_STATUS);
+
+    /* edit */
+#ifdef DM9051_FLOWCONTROL_EN
+    DM9051_write_reg(spi_device, DM9051_FCR, FCR_FLOW_ENABLE); /* Flow Control */
+#else
+    DM9051_write_reg(spi_device, DM9051_FCR, 0x00); /* Flow Control */
+#endif
+    DM9051_write_reg(spi_device, DM9051_PPCR, PPCR_SETTING); /* Fully Pause Packet Count */
+    DM9051_write_reg(spi_device, DM9051_NLEDCR, 0x81);       //set led model
+    DM9051_write_reg(spi_device, DM9051_ATCR, 0x80);         //set TX auto_send
+    DM9051_write_reg(spi_device, DM9051_BCASTCR, 0xC0);      //set rec broadcast packet
+
+    DM9051_write_reg(spi_device, DM9051_RCR, RCR_DEFAULT);
 }
 
 static void dm9051_chip_reset(struct rt_spi_device *spi_device)
@@ -158,11 +201,7 @@ static void dm9051_chip_reset(struct rt_spi_device *spi_device)
     //dbg_log("++\n");
     dm9051_soft_reset(spi_device);
 
-    DM9051_write_reg(spi_device, DM9051_FCR, FCR_FLOW_ENABLE); /* Flow Control */
-    DM9051_write_reg(spi_device, DM9051_PPCR, PPCR_SETTING);   /* Fully Pause Packet Count */
-    DM9051_write_reg(spi_device, DM9051_IMR, IMR_PAR | IMR_ROOI | IMR_ROI | IMR_PTM | IMR_PRM | IMR_LNKCHGI);
-    //dm9051_spi_write_reg(db, DM9051_RCR, RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN);
-    //DM9051_write_reg(spi_device, DM9051_RCR, db->rcr_all);
+    DM9051_write_reg(spi_device, DM9051_IMR, DM9051_IMR_SET);
 }
 
 #define DM9051_PHY              (0x40)    /* PHY address 0x01 */
@@ -205,11 +244,143 @@ static uint16_t phy_read(struct rt_spi_device *spi_device, uint32_t reg_oft)
 
 static void phy_mode_set(struct rt_spi_device *spi_device)
 {
-    uint16_t phy_reg4 = 0x01e1, phy_reg0 = 0x1000;
+    uint16_t phy_reg4 = 0x01e1, phy_reg0 = 0x1200;
 
+    phy_write(spi_device, 20, 0x0200); /* Disable NWAY powersaver */
+
+#ifdef DM9051_FLOWCONTROL_EN
+    phy_write(spi_device, 4, phy_reg4 | 0x0400); /* Set PHY media mode */
+#else
     phy_write(spi_device, 4, phy_reg4); /* Set PHY media mode */
-    phy_write(spi_device, 0, phy_reg0); /* Tmp */
+#endif /* DM9051_FLOWCONTROL_EN */
+    phy_write(spi_device, 0, phy_reg0); /* RE_START NWAY */
 }
+
+#if (LWIP_IPV4 && LWIP_IGMP) || (LWIP_IPV6 && LWIP_IPV6_MLD)
+
+/* polynomial: 0xEDB88320L */
+static uint32_t crc32_le(const uint8_t *data, size_t length)
+{
+    uint32_t crc = 0xffffffff;
+
+    int i;
+    while (length--)
+    {
+        crc ^= *data++;
+        for (i = 0; i < 8; i++)
+        {
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320L : 0);
+        }
+    }
+    return crc;
+}
+
+static void register_multicast_address(struct rt_dm9051_eth *eth, const uint8_t *mac, u8_t action)
+{
+    struct rt_spi_device *spi_device;
+    spi_device = eth->spi_device;
+
+    uint32_t crc;
+    uint8_t hash;
+    uint8_t hash_group;
+
+    /* calculate crc32 value of mac address */
+    crc = crc32_le(mac, 6);
+
+    hash = crc & 0x3F;
+    LOG_D("register_%s multicast_address crc: %08X hash: %02X\n",
+          ((action) ? "add" : "del"), crc, hash);
+
+    hash_group = hash / 8;
+
+    if (hash > 31)
+    {
+        if (action) // NETIF_ADD_MAC_FILTER
+        {
+            eth->HashTableHigh |= 1 << (hash - 32);
+        }
+        else // NETIF_DEL_MAC_FILTER
+        {
+            eth->HashTableHigh &= ~(1 << (hash - 32));
+        }
+        DM9051_write_reg(spi_device, DM9051_MAR + hash_group, (eth->HashTableHigh >> (hash_group - 4) * 8) & 0xff);
+    }
+    else
+    {
+        if (action) // NETIF_ADD_MAC_FILTER
+        {
+            eth->HashTableLow |= 1 << hash;
+        }
+        else // NETIF_DEL_MAC_FILTER
+        {
+            eth->HashTableLow &= ~(1 << hash);
+        }
+        DM9051_write_reg(spi_device, DM9051_MAR + hash_group, (eth->HashTableLow >> (hash_group * 8)) & 0xff);
+    }
+    /*
+    {
+        LOG_I("HashTableHigh %08lx , HashTableLow %08lx ",
+                eth->HashTableHigh , eth->HashTableLow );
+        uint8_t mar[8];
+        uint8_t i, oft;
+        for (i = 0, oft = DM9051_MAR; i < sizeof(mar); i++, oft++)
+        {
+            mar[i] = DM9051_read_reg(spi_device, oft);
+        }
+        LOG_I("MAR: %02X-%02X-%02X-%02X-%02X-%02X-%02X-%02X",
+                mar[0], mar[1], mar[2], mar[3], mar[4], mar[5], mar[6], mar[7]);
+    }
+    */
+}
+#endif /* (LWIP_IPV4 && LWIP_IGMP) || (LWIP_IPV6 && LWIP_IPV6_MLD) */
+
+#if LWIP_IPV4 && LWIP_IGMP
+static err_t igmp_mac_filter( struct netif *netif, const ip4_addr_t *ip4_addr, u8_t action )
+{
+    uint8_t mac[6];
+    const uint8_t *p = (const uint8_t *)ip4_addr;
+    struct rt_dm9051_eth *eth = (struct rt_dm9051_eth *)netif->state;
+
+    mac[0] = 0x01;
+    mac[1] = 0x00;
+    mac[2] = 0x5E;
+    mac[3] = *(p+1) & 0x7F;
+    mac[4] = *(p+2);
+    mac[5] = *(p+3);
+
+    register_multicast_address(eth, mac, action);
+
+    LOG_D("%s %s %s ",
+            __FUNCTION__, (action==NETIF_ADD_MAC_FILTER)?"add":"del", ip4addr_ntoa(ip4_addr));
+    LOG_D("%02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    return 0;
+}
+#endif /* LWIP_IPV4 && LWIP_IGMP */
+
+#if LWIP_IPV6 && LWIP_IPV6_MLD
+static err_t mld_mac_filter( struct netif *netif, const ip6_addr_t *ip6_addr, u8_t action )
+{
+    uint8_t mac[6];
+    const uint8_t *p = (const uint8_t *)&ip6_addr->addr[3];
+    struct rt_dm9051_eth *eth = (struct rt_dm9051_eth *)netif->state;
+
+    mac[0] = 0x33;
+    mac[1] = 0x33;
+    mac[2] = *(p+0);
+    mac[3] = *(p+1);
+    mac[4] = *(p+2);
+    mac[5] = *(p+3);
+
+    register_multicast_address(eth, mac, action);
+
+    LOG_D("%s %s %s ",
+             __FUNCTION__, (action==NETIF_ADD_MAC_FILTER)?"add":"del", ip6addr_ntoa(ip6_addr));
+    LOG_D("%02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    return 0;
+}
+#endif /* LWIP_IPV6 && LWIP_IPV6_MLD */
 
 /* initialize the interface */
 static rt_err_t dm9051_init(rt_device_t dev)
@@ -257,27 +428,26 @@ static rt_err_t dm9051_init(rt_device_t dev)
         LOG_I("MAC: %02X-%02X-%02X-%02X-%02X-%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
 
+    {
+        for (i = 0, oft = DM9051_MAR; i < 8; i++, oft++)
+        {
+            DM9051_write_reg(spi_device, oft, 0x00);
+        }
+        LOG_I("Clean Multicast Address Hash Table");
+#if (LWIP_IPV4 && LWIP_IGMP) || (LWIP_IPV6 && LWIP_IPV6_MLD)
+        eth->HashTableHigh = 0;
+        eth->HashTableLow = 0;
+#endif
+    }
+
     /* Activate DM9051 */
-    /* Setup DM9051 Registers */
-    DM9051_write_reg(spi_device, DM9051_NCR, NCR_DEFAULT);
-    DM9051_write_reg(spi_device, DM9051_TCR, TCR_DEFAULT);
-    //DM9051_write_reg(spi_device, DM9051_TCR, 0x20); //Disable underrun retry.
-    DM9051_write_reg(spi_device, DM9051_RCR, RCR_DEFAULT);
-    DM9051_write_reg(spi_device, DM9051_BPTR, BPTR_DEFAULT);
-    //DM9051_write_reg(spi_device, DM9051_FCTR, FCTR_DEAFULT);
-    DM9051_write_reg(spi_device, DM9051_FCTR, 0x3A);
-    DM9051_write_reg(spi_device, DM9051_FCR, FCR_DEFAULT);
-    //DM9051_write_reg(spi_device, DM9051_FCR,  0x0); //Disable Flow_Control
-    DM9051_write_reg(spi_device, DM9051_SMCR, SMCR_DEFAULT);
-    DM9051_write_reg(spi_device, DM9051_TCR2, DM9051_TCR2_SET);
-    //DM9051_write_reg(spi_device, DM9051_TCR2, 0x80);
+    dm9051_soft_reset(spi_device);
 
-    //DM9051_write_reg(spi_device, DM9051_INTCR, (0<<1) | (1<<0)); /* [1] 0:push-pull. [0] 0:active high, 1:active low. */
-    DM9051_write_reg(spi_device, DM9051_INTR, 0x00);
-
-    /* Clear status */
-    DM9051_write_reg(spi_device, DM9051_NSR, NSR_CLR_STATUS);
-    DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_STATUS);
+#ifdef DM9051_FLOWCONTROL_EN
+    LOG_I("Enable Flow_Control Function");
+#else
+    LOG_I("Disable Flow_Control Function");
+#endif
 
     rt_pin_irq_enable(eth->int_pin, PIN_IRQ_ENABLE);
     rt_timer_start(&eth->timer);
@@ -360,14 +530,20 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
 #endif /* DM9051_TX_DUMP */
 
     {
-        rt_uint32_t retry=0;
+        rt_uint32_t retry = 0;
+        uint8_t nsr_reg = 0;
 
         // wait for sending complete
-        while (DM9051_read_reg(spi_device, DM9051_TCR) & TCR_TXREQ)
+        while (1)
         {
-            retry++;
+            nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR) & (NSR_TX1END | NSR_TX2END);
+            if(nsr_reg != 0)
+            {
+                break;
+            }
 
-            if(retry > 10)
+            retry++;
+            if (retry > 10)
             {
                 LOG_E("wait for send complete timeout, retry=%d, abort!", retry);
                 goto _exit;
@@ -376,18 +552,23 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
             rt_thread_delay(1);
         }
 
-        if(retry > 2)
+        if (retry > 2)
         {
             LOG_E("TX wait %d.", retry);
         }
+
+        if ((NSR_TX1END | NSR_TX2END) == nsr_reg)
+        {
+            DM9051_write_reg(spi_device, DM9051_MPCR, 0x02); //reset tx point
+        }
     }
 
-    if(p->tot_len != p->len)
+    if (p->tot_len != p->len)
     {
         LOG_D("[%s L%d], tot_len:len ==> %d:%d", __FUNCTION__, __LINE__, p->tot_len, p->len);
 
         tmp_buf = (void *)rt_malloc(p->tot_len);
-        if(!tmp_buf)
+        if (!tmp_buf)
         {
             LOG_W("[%s L%d], no memory for pbuf, len=%d.", __FUNCTION__, __LINE__, p->tot_len);
             goto _exit;
@@ -395,6 +576,10 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
 
         pbuf_copy_partial(p, tmp_buf, p->tot_len, 0);
     }
+
+    //Write data to FIFO
+    DM9051_write_reg(spi_device, DM9051_TXPLL, p->tot_len & 0xff);
+    DM9051_write_reg(spi_device, DM9051_TXPLH, (p->tot_len >> 8) & 0xff);
 
     if (tmp_buf)
     {
@@ -405,15 +590,12 @@ static rt_err_t dm9051_tx(rt_device_t dev, struct pbuf *p)
         DM9051_write_mem(spi_device, p->payload, p->tot_len);
     }
 
-    //Write data to FIFO
-    DM9051_write_reg(spi_device, DM9051_TXPLL, p->tot_len & 0xff);
-    DM9051_write_reg(spi_device, DM9051_TXPLH, (p->tot_len >> 8) & 0xff);
-
-    // start send cmd
-    DM9051_write_reg(spi_device, DM9051_TCR, TCR_TXREQ);
+#ifdef DM9051_PACKET_CNT_EN
+    eth->tx_count++;
+#endif /* DM9051_PACKET_CNT_EN */
 
 _exit:
-    if(tmp_buf)
+    if (tmp_buf)
     {
         rt_free(tmp_buf);
     }
@@ -430,6 +612,7 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
     struct rt_spi_device *spi_device;
 
     uint8_t isr_reg, rxbyte;
+    uint8_t nsr_reg;
     struct pbuf *p = RT_NULL;
 
     eth = (struct rt_dm9051_eth *)dev;
@@ -440,57 +623,49 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
 
     dm9051_lock(dev);
 
-    DM9051_write_reg(spi_device, DM9051_IMR, IMR_PAR); // Disable all interrupts
+    DM9051_write_reg(spi_device, DM9051_IMR, DM9051_IMR_OFF); // Disable all interrupts
     isr_reg = DM9051_read_reg(spi_device, DM9051_ISR);
-    DM9051_write_reg(spi_device, DM9051_ISR, isr_reg);	// Clear ISR status ---> can be clear ???
+    DM9051_write_reg(spi_device, DM9051_ISR, (isr_reg & ISR_CLR_STATUS));  // Clear ISR status
     LOG_D("isr_reg=0x%x", isr_reg);
 
     /*********** link status check*************/
     if (isr_reg & ISR_LNKCHGS)
     {
-        uint8_t nsr = DM9051_read_reg(spi_device, DM9051_NSR);
-        LOG_D("[%s L%d] DM9051_NSR=0x%08X", __FUNCTION__, __LINE__, nsr);
-
-        if(nsr & NSR_LINKST)
+        nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR);
+        if (nsr_reg & NSR_LINKST)
         {
-            uint16_t lnk, stats;
+#ifdef DM9051_WAIT_NWAY_LINK_EN
+            uint8_t lnk_status;
+            uint8_t ncr_reg;
 
-            lnk = phy_read(spi_device, DM9051_PHY_REG_BMSR); // 786D: 0111 1000 0110 1101
-            stats = phy_read(spi_device, DM9051_PHY_REG_DSCSR); // 8218 1000 0010 0001 1000
+            rt_thread_delay(rt_tick_from_millisecond(5000));
 
-            LOG_D("lnk=%04X, stats=%04X", lnk, stats);
-            if (lnk & (1 << 5))
+            ncr_reg = DM9051_read_reg(spi_device, DM9051_NCR) & NCR_FDX;
+            nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR) & (NSR_SPEED | NSR_LINKST);
+
+            lnk_status = nsr_reg | ncr_reg;
+            LOG_D("[%s L%d] DM9051_NSR=0x%08X", __FUNCTION__, __LINE__, lnk_status);
+            switch (lnk_status)
             {
-                LOG_D("phy auto done!", __FUNCTION__, __LINE__);
+            case (NSR_LINKST):
+                LOG_I("link up phy 100M hal duplex!", __FUNCTION__, __LINE__);
+                break;
+            case (NSR_LINKST | NCR_FDX):
+                LOG_I("link up phy 100M full duplex!", __FUNCTION__, __LINE__);
+                break;
+            case (NSR_SPEED | NSR_LINKST):
+                LOG_I("link up phy 10M hal duplex!", __FUNCTION__, __LINE__);
+                break;
+            case (NSR_SPEED | NSR_LINKST | NCR_FDX):
+                LOG_I("link up phy 10M full duplex!", __FUNCTION__, __LINE__);
+                break;
+
+            default:
+                break;
             }
-
-            if (stats & (1 << 3))
-            {
-                stats = stats>>12;
-                switch (stats)
-                {
-                case 1:
-                    LOG_I("phy 10M half duplex!", __FUNCTION__, __LINE__);
-                    break;
-
-                case 2:
-                    LOG_I("phy 10M full duplex!", __FUNCTION__, __LINE__);
-                    break;
-
-                case 4:
-                    LOG_I("phy 100M half duplex!", __FUNCTION__, __LINE__);
-                    break;
-
-                case 8:
-                    LOG_I("phy 100M full duplex!", __FUNCTION__, __LINE__);
-                    break;
-
-                default:
-                    break;
-                }
-            }
-
+#else
             LOG_I("link up!", __FUNCTION__, __LINE__);
+#endif /* DM9051_WAIT_NWAY_LINK_EN */
             eth_device_linkchange(&eth->parent, RT_TRUE);
         }
         else
@@ -498,22 +673,20 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
             LOG_W("link down!\n", __FUNCTION__, __LINE__);
             eth_device_linkchange(&eth->parent, RT_FALSE);
         }
-    }
+    } /* link status check */
 
     // Receive Overflow Counter Overflow
     if (isr_reg & ISR_ROOS)
     {
-        LOG_W("dm9051_chip_reset \n");
+        LOG_E("dm9051_chip_reset Receive Overflow Counter Overflow");
         dm9051_chip_reset(spi_device);
-        DM9051_write_reg(spi_device, DM9051_RCR, (RCR_DEFAULT | RCR_RXEN | (1<<3) | (1<<1))); //RX Enable
+        goto _exit;
     }
 
     // Receive Overflow
     if (isr_reg & ISR_ROS)
     {
-        LOG_W("dm9051_chip_reset \n");
-        dm9051_chip_reset(spi_device);
-        DM9051_write_reg(spi_device, DM9051_RCR, (RCR_DEFAULT | RCR_RXEN | (1<<3) | (1<<1))); //RX Enable
+        LOG_W("Receive_FIFO Overflow");
     }
 
     // transmit
@@ -524,57 +697,97 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
 
     if (isr_reg & ISR_PRS)
     {
-    }
-
-    /* Check packet ready or not                                                                              */
-    rxbyte = DM9051_read_reg(spi_device, DM9051_MRCMDX);
-    rxbyte = DM9051_read_reg(spi_device, DM9051_MRCMDX);
-    LOG_D("MRCMDX = %02X.", rxbyte);
-
-    if ((rxbyte != 1) && (rxbyte != 0))
-    {
-        LOG_W("MRCMDX %02X: rx error, dm9051_chip_reset", rxbyte);
-
-        dm9051_chip_reset(spi_device);
-
-        /* Reset RX FIFO pointer */
-        //DM9051_write_reg(spi_device, DM9051_RCR, RCR_DEFAULT); //RX disable
-        //DM9051_write_reg(spi_device, DM9051_MPCR, 0x01);       //Reset RX FIFO pointer
-        rt_thread_delay(2);
-        DM9051_write_reg(spi_device, DM9051_RCR, (RCR_DEFAULT | RCR_RXEN | (1<<3) | (1<<1))); //RX Enable
-
-        goto _exit;
-    }
-
-    if (rxbyte)
-    {
         uint16_t rx_status, rx_len;
-        //uint16_t* data = 0;
-
         uint8_t ReceiveData[4];
 
-        DM9051_read_reg(spi_device, DM9051_MRCMDX); //dummy read
+        /* Check packet ready or not                                                                              */
+        nsr_reg = DM9051_read_reg(spi_device, DM9051_NSR) & NSR_RXRDY;
+        if (nsr_reg)
+        {
+            rxbyte = DM9051_read_reg(spi_device, DM9051_MRCMDX);
+            rxbyte = DM9051_read_reg(spi_device, DM9051_MRCMDX1);
+            LOG_D("MRCMDX = %02X.", rxbyte);
+
+            if (rxbyte != 0x01)
+            {
+                LOG_E("NSR %02X, RCMDX %02X: rx error, dm9051_chip_rx_fifo_reset", nsr_reg, rxbyte);
+                DM9051_write_reg(spi_device, DM9051_MPCR, 0x01); //reset rx point
+                DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_RX_STATUS);
+
+                goto _exit;
+            }
+        }
+        else
+        {
+            DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_RX_STATUS);
+
+            goto _exit;
+        }
 
         DM9051_read_mem(spi_device, ReceiveData, 4);
 
         rx_status = ReceiveData[0] + (ReceiveData[1] << 8);
         rx_len = ReceiveData[2] + (ReceiveData[3] << 8);
-        rx_status = rx_status;
-        LOG_D("rx_status = %04X. rx_len = %04X.", rx_status, rx_len);
+
+        if ((rx_status & 0x3900) || rx_len < 12)
+        {
+            LOG_W("rx_status = %04X. rx_len = %04X.", rx_status, rx_len);
+        }
+        else
+        {
+            LOG_D("rx_status = %04X. rx_len = %04X.", rx_status, rx_len);
+        }
 
         /* allocate buffer           */
         p = pbuf_alloc(PBUF_LINK, rx_len, PBUF_RAM);
         if (p != NULL)
         {
+#ifdef DM9051_PACKET_CNT_EN
+            eth->rx_count++;
+#endif /* DM9051_PACKET_CNT_EN */
             DM9051_read_mem(spi_device, (u8_t *)p->payload, rx_len);
         }
         else
         {
-            LOG_E("DM9051 rx: no pbuf.");
-            /* no pbuf, discard data from DM9051  */
-            //DM9051_read_mem(spi_device, databyte, rx_len);
+            LOG_W("DM9051 rx: no pbuf.");
+
+#if (DM9051_NO_PBUF_LEVEL >= 2)
+            //keep data in dm9051 fifo
+            uint16_t wRx_point;
+
+            wRx_point = (DM9051_read_reg(spi_device, DM9051_MRRH) << 8);
+            wRx_point |= DM9051_read_reg(spi_device, DM9051_MRRL);
+
+            wRx_point -= 04;
+            if (wRx_point < 0x0c00)
+            {
+                wRx_point += 0x3400;
+            }
+
+            DM9051_write_reg(spi_device, DM9051_MRRL, wRx_point & 0xff);
+            DM9051_write_reg(spi_device, DM9051_MRRH, (wRx_point >> 8) & 0xff);
+#elif (DM9051_NO_PBUF_LEVEL == 1)
+            // jump one packet
+            uint16_t wRx_point;
+
+            wRx_point = (DM9051_read_reg(spi_device, DM9051_MRRH) << 8);
+            wRx_point |= DM9051_read_reg(spi_device, DM9051_MRRL);
+
+            wRx_point += rx_len;
+            if (wRx_point > 0x3fff)
+            {
+                wRx_point -= 0x3400;
+            }
+
+            DM9051_write_reg(spi_device, DM9051_MRRL, wRx_point & 0xff);
+            DM9051_write_reg(spi_device, DM9051_MRRH, (wRx_point >> 8) & 0xff);
+#else
+            //clean rx fifo data
+            DM9051_write_reg(spi_device, DM9051_MPCR, 0x01); //reset rx point
+            DM9051_write_reg(spi_device, DM9051_ISR, ISR_CLR_RX_STATUS);
+#endif
         }
-    }
+    } /* isr_reg & ISR_PRS */
 
 #ifdef DM9051_RX_DUMP
     if(p)
@@ -582,7 +795,7 @@ static struct pbuf *dm9051_rx(rt_device_t dev)
 #endif /* DM9051_RX_DUMP */
 
 _exit:
-    DM9051_write_reg(spi_device, DM9051_IMR, IMR_PAR | IMR_ROOI | IMR_ROI | IMR_PTM | IMR_PRM | IMR_LNKCHGI); // Re-enable interrupt mask
+    DM9051_write_reg(spi_device, DM9051_IMR, DM9051_IMR_SET); // Re-enable interrupt mask
 
     dm9051_unlock(dev);
 
@@ -710,7 +923,16 @@ int dm9051_probe(const char *spi_dev_name, const char *device_name, int rst_pin,
     rt_timer_init(&eth->timer, "dm9051", dm9051_timeout, eth, RT_TICK_PER_SECOND/2, RT_TIMER_FLAG_PERIODIC | RT_TIMER_FLAG_SOFT_TIMER);
 
     dm9051_monitor = eth;
+
     eth_device_init(&eth->parent, "e0");
+
+#if LWIP_IPV4 && LWIP_IGMP
+    netif_set_igmp_mac_filter(eth->parent.netif, igmp_mac_filter);
+#endif
+
+#if LWIP_IPV6 && LWIP_IPV6_MLD
+    netif_set_mld_mac_filter(eth->parent.netif, mld_mac_filter);
+#endif
 
     return 0;
 }
@@ -722,6 +944,14 @@ static int dm9051_dump(void)
     struct rt_spi_device *spi_device = dm9051_monitor->spi_device;
 
     rt_kprintf("[%s L%d], irq count:%d.\n", __FUNCTION__, __LINE__, dm9051_monitor->irq_count);
+    dm9051_monitor->irq_count = 0;
+
+#ifdef DM9051_PACKET_CNT_EN
+    rt_kprintf("[%s L%d], tx_count:%d.\n", __FUNCTION__, __LINE__, dm9051_monitor->tx_count);
+    rt_kprintf("[%s L%d], rx_count:%d.\n", __FUNCTION__, __LINE__, dm9051_monitor->rx_count);
+    dm9051_monitor->tx_count = 0;
+    dm9051_monitor->rx_count = 0;
+#endif /* DM9051_PACKET_CNT_EN */
 
     pos=0;
     value = DM9051_read_reg(spi_device, pos);
@@ -797,6 +1027,7 @@ static int dm9051_dump(void)
 
     pos = DM9051_PHY_REG_BMSR;
     value = phy_read(spi_device, pos);
+    value = phy_read(spi_device, pos); //update_value
     rt_kprintf("#%02X 0x%04X BMSR\n", pos, value);
 
     /* ID1=0181, ID2=B8A0, OUI=0x0000C0DC, Vendor Model:0x0A, Model Revision:0x00. */

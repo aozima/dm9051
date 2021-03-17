@@ -13,6 +13,7 @@
 #define DM9051_EPDRL            (0x0D)
 #define DM9051_EPDRH            (0x0E)
 #define DM9051_PAR              (0x10)
+#define DM9051_MAR              (0x16)
 #define DM9051_GPCR	       		(0x1E)
 #define DM9051_GPR              (0x1f)
 #define DM9051_TRPAL            (0x22)
@@ -46,12 +47,18 @@
 #define DM9051_IMR             	0x7F //0xFF
 
 #define DM9051_MRCMDX           (0x70)
+#define DM9051_MRCMDX1          (0x71)
 #define DM_SPI_MRCMDX			(0x70)
 #define DM_SPI_MRCMD			(0x72)
 #define DM_SPI_MWCMD			(0x78)
 
 #define DM_SPI_RD				(0x00)
 #define DM_SPI_WR				(0x80)
+
+#define DM9051_ATCR             (0x30)
+#define DM9051_NLEDCR           (0x57)
+#define DM9051_BCASTCR          (0X53)
+#define DM9051_INTCKCR          (0x54)
 
 /* DM9051 PHY register list */
 #define DM9051_PHY_REG_BMCR     (0x00) /* Basic Mode Control Register */
@@ -79,7 +86,9 @@
 #define NSR_TX2END          (1 << 3)
 #define NSR_TX1END          (1 << 2)
 #define NSR_RXOV            (1 << 1)
-#define NSR_CLR_STATUS		(NSR_WAKEST | NSR_TX2END | NSR_TX1END)
+#define NSR_RXRDY           (1 << 0)
+//#define NSR_CLR_STATUS        (NSR_WAKEST | NSR_TX2END | NSR_TX1END)
+#define NSR_CLR_STATUS      (NSR_WAKEST)
 
 /* 0x02 */
 #define TCR_TJDIS           (1 << 6)
@@ -100,11 +109,11 @@
 #define RCR_PRMSC           (1 << 1)
 #define RCR_RXEN            (1 << 0)
 #define RCR_RX_DISABLE      (RCR_DIS_LONG | RCR_DIS_CRC) // #define RCR_RX_DISABLE 0x30
-#define RCR_DEFAULT		    (RCR_DIS_LONG | RCR_DIS_CRC | RCR_ALL | RCR_RUNT | RCR_RXEN)
+#define RCR_DEFAULT		    (RCR_DIS_LONG | RCR_DIS_CRC | RCR_RXEN)
 
 #define BPTR_DEFAULT	    (0x3f)
 #define FCTR_DEAFULT	    (0x38)
-#define FCR_DEFAULT		    (0xFF)
+#define FCR_DEFAULT		    (0x28)
 #define SMCR_DEFAULT	    (0x00)
 
 //0x0A
@@ -128,7 +137,9 @@
 #define ISR_ROS             (1<<2)
 #define ISR_PTS             (1<<1)
 #define ISR_PRS             (1<<0)
-#define ISR_CLR_STATUS      (ISR_LNKCHGS | ISR_ROOS | ISR_ROS | ISR_PTS | ISR_PRS)
+#define ISR_CLR_STATUS      (ISR_LNKCHGS | ISR_ROOS | ISR_ROS | ISR_PTS)
+#define ISR_CLR_RX_STATUS   (ISR_PRS)
+
 //0xFF
 #define IMR_PAR             (1<<7)
 #define IMR_LNKCHGI         (1<<5)
@@ -136,14 +147,15 @@
 #define IMR_ROI             (1<<2)
 #define IMR_PTM             (1<<1)
 #define IMR_PRM             (1<<0)
+#define DM9051_IMR_OFF      (IMR_PAR)
+#define DM9051_IMR_SET      (IMR_PAR | IMR_ROOI | IMR_ROI | IMR_PRM | IMR_LNKCHGI)
+
 //Const
 #define DM9051_PKT_RDY		0x01	/* Packet ready to receive */
 #define DM9051_PKT_MAX		1536	/* Received packet max size */
 
 #define DM9051_REG_RESET     (0x01)
-#define DM9051_IMR_OFF       (0x80)
 #define DM9051_TCR2_SET      (0x90)	//one packet
-#define DM9051_RCR_SET       (0x31)
 #define DM9051_BPTR_SET      (0x37)
 #define DM9051_FCTR_SET      (0x38)
 #define DM9051_FCR_SET       (0x28)
